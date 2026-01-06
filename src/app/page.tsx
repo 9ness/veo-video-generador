@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import ImageUploader from '@/components/ImageUploader';
 import VideoPlayer from '@/components/VideoPlayer';
-import { Sparkles, Loader2, AlertCircle, Wand2, Film } from 'lucide-react';
+import { Sparkles, Loader2, AlertCircle, Wand2, Film, Lock } from 'lucide-react';
 
 export default function Home() {
   const [images, setImages] = useState<string[]>([]);
@@ -11,10 +11,29 @@ export default function Home() {
   const [status, setStatus] = useState<'IDLE' | 'GENERATING' | 'SUCCESS' | 'ERROR'>('IDLE');
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState('');
+  const [showPasswordModal, setShowPasswordModal] = useState(false);
+  const [passwordInput, setPasswordInput] = useState('');
 
   const handleGenerate = async () => {
     if (!prompt) return;
 
+    // Check for password
+    const storedPassword = localStorage.getItem('veo_access_password');
+    if (!storedPassword) {
+      setShowPasswordModal(true);
+      return;
+    }
+
+    performGeneration(storedPassword);
+  };
+
+  const confirmPassword = () => {
+    localStorage.setItem('veo_access_password', passwordInput);
+    setShowPasswordModal(false);
+    performGeneration(passwordInput);
+  };
+
+  const performGeneration = async (pwd: string) => {
     setStatus('GENERATING');
     setErrorMsg('');
     setVideoUrl(null);
@@ -28,7 +47,8 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           prompt,
-          images: images
+          images: images,
+          password: pwd
         })
       });
 
@@ -175,6 +195,35 @@ export default function Home() {
           )}
         </div>
       </div>
+
+      {/* PASSWORD MODAL */}
+      {showPasswordModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md animate-in fade-in duration-300">
+          <div className="w-full max-w-sm p-6 bg-[#0a0a0a] rounded-2xl border border-white/10 shadow-2xl flex flex-col gap-4 animate-in zoom-in-95 duration-300">
+            <div className="flex items-center gap-3 text-violet-400">
+              <Lock className="w-5 h-5" />
+              <h3 className="font-bold text-lg text-white">Acceso Requerido</h3>
+            </div>
+            <p className="text-neutral-400 text-sm">
+              Introduce la contraseña para usar el generador.
+              <br /><span className="text-neutral-500 text-xs mt-1 block">Solo se te pedirá la primera vez.</span>
+            </p>
+            <input
+              type="password"
+              placeholder="Contraseña..."
+              value={passwordInput}
+              onChange={(e) => setPasswordInput(e.target.value)}
+              className="w-full bg-neutral-900 border border-white/10 rounded-xl p-3 text-white focus:outline-none focus:border-violet-500 transition-colors"
+            />
+            <button
+              onClick={confirmPassword}
+              className="w-full py-3 bg-white text-black font-bold rounded-xl hover:bg-neutral-200 transition-colors"
+            >
+              Confirmar Acceso
+            </button>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
