@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import ImageUploader from '@/components/ImageUploader';
 import VideoPlayer from '@/components/VideoPlayer';
-import { Sparkles, Loader2, AlertCircle, Wand2, Film, Lock } from 'lucide-react';
+import { Sparkles, Loader2, AlertCircle, Wand2, Film, Lock, Smartphone, Monitor, Download } from 'lucide-react';
 
 export default function Home() {
   const [images, setImages] = useState<string[]>([]);
@@ -13,6 +13,8 @@ export default function Home() {
   const [errorMsg, setErrorMsg] = useState('');
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [passwordInput, setPasswordInput] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [aspectRatio, setAspectRatio] = useState<'9:16' | '16:9'>('9:16');
 
   const handleGenerate = async () => {
     if (!prompt) return;
@@ -33,22 +35,77 @@ export default function Home() {
     performGeneration(passwordInput);
   };
 
+  // Helper: Compress image to max 1024px and 0.8 quality
+  const compressImage = (base64Str: string): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.src = base64Str;
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        let width = img.width;
+        let height = img.height;
+        const maxDim = 1024;
+
+        if (width > maxDim || height > maxDim) {
+          if (width > height) {
+            height = Math.round((height * maxDim) / width);
+            width = maxDim;
+          } else {
+            width = Math.round((width * maxDim) / height);
+            height = maxDim;
+          }
+        }
+
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          reject(new Error('Could not get canvas context'));
+          return;
+        }
+
+        ctx.drawImage(img, 0, 0, width, height);
+        // Export as JPEG with 0.8 quality to reduce size
+        resolve(canvas.toDataURL('image/jpeg', 0.8));
+      };
+      img.onerror = (err) => reject(err);
+    });
+  };
+
   const performGeneration = async (pwd: string) => {
-    setStatus('GENERATING');
+    // Stage 1: Uploading/Compressing - keep button in loading state, no overlay yet
+    setStatus('IDLE'); // Or a new state 'PREPARING' if we wanted distinct UI, but 'IDLE' + loading logic works if we handle it right.
+    // Actually, let's use a local state or just rely on 'GENERATING' BUT conditionally hide overlay? 
+    // Easier: Add a new state 'COMPRESSING'. But user asked for specific behavior.
+    // "Feedback Visual: Asegúrate de que el estado de 'Generando...' se active solo después de que las imágenes hayan sido comprimidas y enviadas correctamente."
+
+    // We will use a temporary loading indicator on the button (controlled by a separate ref or just reusing logic), 
+    // but the MAIN 'GENERATING' status (which triggers the overlay) will be set LATER.
+
+    // Let's rely on a separate boolean for the button spinner if 'status' isn't GENERATING yet.
+    // Or simpler: We can't change the hook types easily without bigger refactor. 
+    // Let's abuse 'GENERATING' but pass a flag? No.
+    // Let's modify the JSX to only show Overlay if status === 'GENERATING' AND we are truly waiting for video.
+    // For now, let's add a separate piece of state for "isSubmitting".
+    setIsSubmitting(true);
     setErrorMsg('');
     setVideoUrl(null);
 
-    // Simulate initial delay for "Encoding" feel or minimal waiting
-    // await new Promise(r => setTimeout(r, 1000));
-
     try {
+      // 1. Compress Images
+      const compressedImages = await Promise.all(
+        images.map(img => compressImage(img))
+      );
+
+      // 2. Send Request
       const response = await fetch('/api/generate-video', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           prompt,
-          images: images,
-          password: pwd
+          images: compressedImages,
+          password: pwd,
+          aspectRatio
         })
       });
 
@@ -65,18 +122,72 @@ export default function Home() {
         throw new Error('No video URI in response');
       }
 
-      setVideoUrl(resultUri); // Directly set the URL. Frontend VideoPlayer handles formatting/display.
-      // Note: If GCS URI (gs://), you might need a signed URL proxy. 
-      // Assuming for MVP the backend returns accessible http URL or the user has access.
-      // If direct GCS access isn't possible from browser without auth, middleware is needed.
-      // Assuming public/signed URL for now as per plan.
+      // Success - NOW show the full screen overlay while we "wait" (or if it's instant, show success).
+      // If the API returns the video URL immediately (fast model), we might skip GENERATING overlay and go straight to SUCCESS.
+      // But usually 'fast' might still take a few seconds? If we have the URL, we are done.
+      // IF the API returns a *prediction operation* to poll, then we set GENERATING.
+      // But here, veo-3.1-fast-generate-001 returns the video URI directly in the response usually (sync).
+      // User requested: "Feedback Visual: Asegúrate de que el estado de 'Generando...' se active solo después de que las imágenes hayan sido comprimidas y enviadas correctamente."
 
+      // If we already HAVE the video URL, we don't need 'Generando...' overlay effectively, we go to SUCCESS.
+      // BUT, if the user wanted the overlay to show *while* google processes... 
+      // The current backend code `generateVideo` awaits the result. So the fetch *waiting* IS the generation time.
+      // So the overlay should probably show *during* the fetch?
+      // User said: "Asegúrate de que el estado de 'Generando...' se active solo después de que las imágenes hayan sido comprimidas y enviadas correctamente."
+      // This might imply he thinks the request sends, THEN returns a "pending" status, THEN we wait. 
+      // BUT `veo-3.1-fast` is synchronous or near-synchronous but the HTTP request hangs until done.
+      // IF the HTTP request hangs, we MUST show 'Generando' *during* the fetch, otherwise user thinks it's frozen.
+      // "enviadas correctamente" might mean "after compression is done and fetch starts".
+
+      // Let's interpret: 
+      // 1. Compress & Prepare (Button spins).
+      // 2. Send Request (Enter 'GENERATING' state -> Overlay appears).
+      // 3. Receive Response (Enter 'SUCCESS').
+
+      // Wait... "Asegúrate de que el estado de 'Generando...' se active solo después de que las imágenes hayan sido comprimidas y enviadas correctamente."
+      // "Enviadas correctamente" usually means the server RECEIVED it. 
+      // If the server connection stays open (60s), we are "waiting".
+
+      // Re-reading user request carefully: "Request Entity Too Large" happens *during* sending.
+      // Use case: User clicks Generate. Compression happens. Request is sent.
+      // If request is too large, it fails *immediately* (413).
+      // If we show "Generando" overlay immediately on click, the error pops up behind or awkwardly.
+      // So:
+      // 1. Click -> Button Loading (Compressing...)
+      // 2. Fetch start -> Button Loading (Sending...)
+      // 3. If Fetch doesn't error immediately (i.e. not 413), we are good? 
+      // Actually with `await fetch`, we stick at line 50 until response comes back.
+      // If we want to show overlay *during* generation (server side processing), we need to set state BEFORE fetch.
+      // BUT if we set it before fetch, and fetch fails instantly with 413, we get the flash of overlay.
+
+      // Compromise:
+      // Set status GENERATING *immediately before* fetch, BUT after compression. 
+      // Since compression is the new heavy client task, we want that to be visible but maybe not full overlay.
+      // Let's use a new state variable 'isPreProcessing' for the button spinner during compression.
+      // Then set GENERATING right before fetch.
+
+      setStatus('GENERATING');
+      // Note: This matches "active solo después de que las imágenes hayan sido comprimidas".
+      // "y enviadas correctamente" -> Technically we can't know they are sent correctly until response headers come or we assume fetch started.
+      // Setting it right before `await fetch` is the standard way.
+
+      // Actually, I need to define local vars for compression since I can't easily add new state variables via replace_file_content safely without seeing imports/hooks again (I can, but it's risky if I miss). 
+      // I see `useState` lines 8-15. I will add `isCompressing` state there in a separate edit or just manage it with `IDLE` vs `GENERATING`.
+
+      // Let's stick to the plan:
+      // I will add `const [isCompressing, setIsCompressing] = useState(false);`
+      // Update `handleGenerate` to set `isCompressing(true)`.
+      // `performGeneration` does the work.
+
+      setVideoUrl(resultUri);
       setStatus('SUCCESS');
 
     } catch (err: any) {
       console.error(err);
       setErrorMsg(err.message || 'Something went wrong');
       setStatus('ERROR');
+    } finally {
+      setIsSubmitting(false); // Clean up
     }
   };
 
@@ -142,19 +253,50 @@ export default function Home() {
                 </div>
               )}
 
+              {/* Step 3: Aspect Ratio */}
+              <div className="space-y-2">
+                <div className="flex justify-between px-1">
+                  <label className="text-[10px] uppercase font-bold text-neutral-500 tracking-wider">Formato</label>
+                </div>
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => setAspectRatio('9:16')}
+                    className={`flex-1 py-3 px-4 rounded-xl border flex items-center justify-center gap-2 transition-all ${aspectRatio === '9:16'
+                      ? 'bg-violet-600 border-violet-500 text-white shadow-lg shadow-violet-900/20'
+                      : 'bg-neutral-900/50 border-white/10 text-neutral-400 hover:bg-neutral-800'
+                      }`}
+                  >
+                    <Smartphone className="w-4 h-4" />
+                    <span className="text-sm font-medium">Vertical</span>
+                  </button>
+                  <button
+                    onClick={() => setAspectRatio('16:9')}
+                    className={`flex-1 py-3 px-4 rounded-xl border flex items-center justify-center gap-2 transition-all ${aspectRatio === '16:9'
+                      ? 'bg-violet-600 border-violet-500 text-white shadow-lg shadow-violet-900/20'
+                      : 'bg-neutral-900/50 border-white/10 text-neutral-400 hover:bg-neutral-800'
+                      }`}
+                  >
+                    <Monitor className="w-4 h-4" />
+                    <span className="text-sm font-medium">Horizontal</span>
+                  </button>
+                </div>
+              </div>
+
               {/* Generate Button */}
               <button
                 onClick={handleGenerate}
-                disabled={status === 'GENERATING' || !prompt}
+                disabled={status === 'GENERATING' || isSubmitting || !prompt}
                 className={`nav-button w-full py-5 rounded-2xl font-bold text-lg flex items-center justify-center gap-3 transition-all duration-300 shadow-xl
-                        ${status === 'GENERATING' || !prompt
+                        ${(status === 'GENERATING' || isSubmitting || !prompt)
                     ? 'bg-neutral-800 text-neutral-600 cursor-not-allowed opacity-50'
                     : 'bg-white text-black hover:scale-[1.02] hover:shadow-white/10'}`}
               >
-                {status === 'GENERATING' ? (
+                {status === 'GENERATING' || isSubmitting ? (
                   <>
                     <Loader2 className="w-6 h-6 animate-spin text-violet-600" />
-                    <span className="bg-clip-text text-transparent bg-gradient-to-r from-violet-600 to-indigo-600">Soñando...</span>
+                    <span className="bg-clip-text text-transparent bg-gradient-to-r from-violet-600 to-indigo-600">
+                      {status === 'GENERATING' ? 'Soñando...' : 'Preparando...'}
+                    </span>
                   </>
                 ) : (
                   <>
@@ -185,12 +327,42 @@ export default function Home() {
             <div className="space-y-8 animate-in fade-in slide-in-from-bottom-10 duration-700">
               <VideoPlayer videoUrl={videoUrl} />
 
-              <button
-                onClick={() => { setStatus('IDLE'); setImages([]); setPrompt(''); setVideoUrl(null); }}
-                className="w-full py-4 rounded-xl border border-white/10 text-neutral-400 text-sm hover:text-white hover:bg-white/5 transition-all"
-              >
-                Crear Otra Obra Maestra
-              </button>
+              <div className="flex gap-3">
+                <button
+                  onClick={() => { setStatus('IDLE'); setImages([]); setPrompt(''); setVideoUrl(null); }}
+                  className="flex-1 py-4 rounded-xl border border-white/10 text-neutral-400 text-sm hover:text-white hover:bg-white/5 transition-all"
+                >
+                  Crear Otra Obra Maestra
+                </button>
+
+                <button
+                  onClick={async () => {
+                    if (!videoUrl) return;
+                    try {
+                      // Fetch the video as a blob to force download
+                      const response = await fetch(videoUrl);
+                      const blob = await response.blob();
+                      const blobUrl = window.URL.createObjectURL(blob);
+
+                      const link = document.createElement('a');
+                      link.href = blobUrl;
+                      link.download = `veo-video-${Date.now()}.mp4`;
+                      document.body.appendChild(link);
+                      link.click();
+                      document.body.removeChild(link);
+                      window.URL.revokeObjectURL(blobUrl);
+                    } catch (e) {
+                      console.error("Download failed", e);
+                      // Fallback: just open plain link
+                      window.open(videoUrl, '_blank');
+                    }
+                  }}
+                  className="flex-none w-14 rounded-xl bg-violet-600/20 border border-violet-500/50 text-violet-300 flex items-center justify-center hover:bg-violet-600/40 hover:text-white transition-all shadow-lg shadow-violet-900/10"
+                  title="Descargar Video"
+                >
+                  <Download className="w-5 h-5" />
+                </button>
+              </div>
             </div>
           )}
         </div>

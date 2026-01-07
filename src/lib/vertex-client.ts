@@ -25,11 +25,16 @@ if (credentials) {
 const client = new PredictionServiceClient(clientOptions);
 
 const project = process.env.GOOGLE_CLOUD_PROJECT_ID || credentials?.project_id || 'your-project-id';
-const location = 'us-central1';
+const location = 'us-central1'; // STRICTLY ENFORCED: Quota is allocated here. Do not change.
 const publisher = 'google';
 const model = 'veo-3.1-fast-generate-001'; // Correct ID per Vertex AI docs
 
-export async function generateVideo(prompt: string, images: string[] = []) {
+export async function generateVideo(prompt: string, images: string[] = [], aspectRatio: string = '9:16') {
+    // Double check location is us-central1
+    if (location !== 'us-central1') {
+        console.warn(`WARNING: Location is set to ${location}, but 'us-central1' is required for Veo 3.1 quota.`);
+    }
+
     const endpoint = `projects/${project}/locations/${location}/publishers/${publisher}/models/${model}`;
 
     // Construct instance based on Veo 3.1 multi-image specs
@@ -45,37 +50,6 @@ export async function generateVideo(prompt: string, images: string[] = []) {
         // Clean base64 strings
         const cleanedImages = images.map(img => img.replace(/^data:image\/\w+;base64,/, ""));
 
-        // Mapping to image_input_config as requested
-        // Note: The exact schema for Veo 3.1 Fast multi-image reference might vary.
-        // Assuming a list of images or specific "image" field sequence.
-        // If the model supports 'image_input_config' directly as a parameter or part of the instance.
-        // Common Vertex AI generative video pattern for consistency:
-        // instance: { prompt: "...", image: { imageBytes: ... } } (Primary)
-        // parameters: { ... }
-
-        // However, user specifically asked for `image_input_config`. 
-        // Usually this might be in the instance or parameters. 
-        // Let's assume it's part of the instance for visual consistency references.
-
-        // Attempting to match the user's "image_input_config" requirement.
-        // If it's a documented field for Veo 3.1.
-        // If unknown, we might try passing under `image` or `references`.
-        // Let's try to pass it as a top-level field in the instance as suggested.
-
-        // Strategy: Pass the first image as the primary 'image' prompt (image-to-video),
-        // and potentially others in a config if supported.
-        // Or if `image_input_config` is the MAIN way:
-
-        /* 
-           Structure implied by request:
-           instance: {
-             prompt: "...",
-             image_input_config: {
-               images: [ { imageBytes: "..." }, ... ]
-             }
-           }
-        */
-
         promptInstance.image_input_config = {
             images: cleanedImages.map(bytes => ({ imageBytes: bytes }))
         };
@@ -87,7 +61,7 @@ export async function generateVideo(prompt: string, images: string[] = []) {
         sampleCount: 1,
         durationSeconds: 5,
         fps: 24,
-        aspectRatio: "16:9",
+        aspect_ratio: aspectRatio, // MAPPED: Request expects snake_case 'aspect_ratio'
         enableAudio: false, // Requested explicit disable
     });
 
